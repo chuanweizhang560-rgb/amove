@@ -81,6 +81,7 @@
 | 25 | Global Planner 反复收到目标无法进入 PLANNING | `rostopic pub --once` 的 latched 消息重复触发 goal_cb，需避免 latching |
 | 26 | D435i RealSensePlugin 崩溃 (assert px!=0) | Camera 渲染器未初始化时 `->Camera()` 返回 null，添加 null 检查 |
 | 27 | D435i 相机数据无输出 (gazebo_gui:=true 也无效) | Docker 内 gzclient 未启动，Camera 传感器依赖渲染引擎 |
+| 28 | 多机仿真 4x P450 需要不同端口 | sitl_px4_outdoor.launch 自动分配 TCP 4560-4563 和 MAVROS namespace |
 
 ---
 
@@ -406,6 +407,7 @@ roslaunch ego_planner sitl_ego_fastlio_mid360.launch
 - [x] ArUco / YOLO 视觉跟踪 ✅ 2026-06-18
 - [x] D435i + Ego Planner 避障飞行（深度图方式）（已验证Mid360+FAST_LIO+Ego Planner链路）
 - [x] 2D Lidar + Global Planner 路径规划 ✅ 2026-06-18
+- [x] 多机 Gazebo 仿真 (4x P450) ✅ 2026-06-18
 
 ---
 
@@ -614,7 +616,46 @@ D435i 的 Gazebo Camera 传感器依赖渲染引擎（gzclient），在 Docker �
 
 ---
 
-## 十二、参考信息
+## 十二、✅ 多机 Gazebo 仿真验证（2026-06-18）
+
+### 验证链路
+
+```
+Gazebo + simple_obstacles.world
+  → 4x P450 spawn 成功 ✅
+    → 4x PX4 SITL 连接 (TCP 4560-4563) ✅
+      → 4x MAVROS HEARTBEAT connected ✅
+        → 4x uav_control connected=True ✅
+```
+
+### 启动命令
+
+```bash
+# Step 1: Gazebo + 4x P450
+roslaunch prometheus_gazebo sitl_outdoor_4uav_P450.launch \
+    gazebo_gui:=false use_sim_time:=true \
+    world:=$(rospack find prometheus_gazebo)/gazebo_worlds/simple_obstacles.world
+
+# Step 2: 4x uav_control
+for id in 1 2 3 4; do
+  roslaunch prometheus_uav_control uav_control_main_outdoor.launch \
+      joy_enable:=false location_source:=2 uav_id:=$id &
+  sleep 2
+done
+```
+
+### 4 机配置
+
+| UAV | 初始 X | MAVROS TCP | Namespace |
+|-----|--------|------------|-----------|
+| uav1 | 4.5 | 4560 | /uav1 |
+| uav2 | 1.5 | 4561 | /uav2 |
+| uav3 | -1.5 | 4562 | /uav3 |
+| uav4 | -4.5 | 4563 | /uav4 |
+
+---
+
+## 十三、参考信息
 
 - Prometheus 仓库：https://github.com/amov-lab/Prometheus
 - Prometheus_PX4 仓库：https://github.com/amov-lab/Prometheus_PX4
