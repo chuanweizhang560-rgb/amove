@@ -76,6 +76,9 @@
 | 20 | RTAB-Map launch 引用不存在的 `prometheus_gfkd` 包 | 直接用 `roslaunch rtabmap_ros rtabmap.launch` 配合正确的话题重映射 |
 | 21 | RTAB-Map TF 树缺失 `base_link` frame | 添加 `uav1/base_link → base_link` 和 `base_link → uav1/camera_link` 静态 TF |
 | 22 | ROS Noetic EOL 警告弹窗 | 设置 `DISABLE_ROS1_EOL_WARNINGS=1` 环境变量 |
+| 23 | `laser_to_pointcloud` 订阅 `/uav1/scan_filtered` 无数据 | 2D Lidar 只发布 `/uav1/scan`，需话题重映射 `/uav1/scan_filtered:=/uav1/scan` |
+| 24 | Global Planner A* 报 "goal point is occupied" | 目标点在障碍物内部（simple_obstacles.world 的方块位置），换到空旷位置即可 |
+| 25 | Global Planner 反复收到目标无法进入 PLANNING | `rostopic pub --once` 的 latched 消息重复触发 goal_cb，需避免 latching |
 
 ---
 
@@ -400,7 +403,7 @@ roslaunch ego_planner sitl_ego_fastlio_mid360.launch
 - [x] RTAB-Map 视觉 SLAM（D435i）✅ 2026-06-18
 - [ ] ArUco / YOLO 视觉跟踪
 - [x] D435i + Ego Planner 避障飞行（深度图方式）（已验证Mid360+FAST_LIO+Ego Planner链路）
-- [ ] 2D Lidar + Global Planner 路径规划
+- [x] 2D Lidar + Global Planner 路径规划 ✅ 2026-06-18
 
 ---
 
@@ -470,7 +473,82 @@ ROS Noetic 于 2025-05-31 停止官方维护，每次启动 ROS 节点会弹出 
 
 ---
 
-## 十、参考信息
+## 十、✅ 2D Lidar + Global Planner 路径规划验证（2026-06-18）
+
+### 验证链路
+
+```
+Gazebo + P450_2Dlidar + simple_obstacles.world
+  → /uav1/scan @10Hz ✅
+    → laser_to_pointcloud (话题重映射 scan_filtered→scan) ✅
+      → /uav1/prometheus/scan_point_cloud @10Hz ✅
+        → scan_to_octomap → /uav1/octomap_full @10Hz ✅
+          → Global Planner A* 建图 (global_pcl 522点, inflate 2608点) ✅
+            → A* 搜索路径 → UAV 追踪到达目标 (-6,4,1.5) ✅
+```
+
+### 启动命令
+
+```bash
+# Step 1: Gazebo + P450_2Dlidar
+roslaunch prometheus_gazebo sitl_p450_2dlidar.launch \
+    gazebo_gui:=false use_sim_time:=true \
+    world:=$(rospack find prometheus_gazebo)/gazebo_worlds/simple_obstacles.world
+
+# Step 2: uav_control
+roslaunch prometheus_uav_control uav_control_main_outdoor.launch \
+    joy_enable:=false location_source:=2
+
+# Step 3: scan_to_octomap（含 laser_to_pointcloud）
+# 注意：需要话题重映射！
+rosrun plan_env laser_to_pointcloud _uav_id:=1 /uav1/scan_filtered:=/uav1/scan &
+roslaunch prometheus_gazebo scan_to_octomap.launch
+
+# Step 4: Global Planner
+roslaunch prometheus_global_planner sitl_global_planner_with_2dlidar.launch
+
+# Step 5: 解锁 + 切换模式
+rostopic pub /uav1/prometheus/setup prometheus_msgs/UAVSetup "{cmd: 0, arming: true}" --once
+rostopic pub /uav1/prometheus/setup prometheus_msgs/UAVSetup "{cmd: 3, control_state: 'COMMAND_CONTROL'}" --once
+
+# Step 6: 起飞到 fly_height（1.5m）
+rostopic pub /uav1/prometheus/command prometheus_msgs/UAVCommand \
+    "{Agent_CMD: 4, Move_mode: 0, position_ref: [0, 0, 1.5], yaw_ref: 0}" -r 5
+# 等 UAV 到 1.5m 后 Ctrl+C
+
+# Step 7: 发送目标点（注意不要用 --once，会 latching）
+python3 -c "
+import rospy; from geometry_msgs.msg import PoseStamped
+rospy.init_node('gs', anonymous=True)
+pub = rospy.Publisher('/uav1/prometheus/motion_planning/goal', PoseStamped, queue_size=1, latch=False)
+rospy.sleep(0.5)
+m = PoseStamped(); m.header.frame_id='world'
+m.pose.position.x=-6.0; m.pose.position.y=4.0; m.pose.position.z=1.5; m.pose.orientation.w=1.0
+pub.publish(m); rospy.sleep(0.5)
+"
+```
+
+### 关键话题
+
+| 话题 | 类型 | 频率 | 说明 |
+|------|------|------|------|
+| `/uav1/scan` | `sensor_msgs/LaserScan` | 10Hz | 2D Lidar 原始扫描 |
+| `/uav1/prometheus/scan_point_cloud` | `sensor_msgs/PointCloud2` | 10Hz | 激光转3D点云 |
+| `/uav1/octomap_full` | `octomap_msgs/Octomap` | 10Hz | Octomap 完整地图 |
+| `/uav1/prometheus/global_planning/global_pcl` | `sensor_msgs/PointCloud2` | 5Hz | Global Planner 全局点云 |
+| `/uav1/prometheus/global_planning/global_inflate_pcl` | `sensor_msgs/PointCloud2` | 5Hz | 膨胀占据点云 |
+| `/uav1/prometheus/global_planner/path_cmd` | `prometheus_msgs/UAVCommand` | 事件驱动 | 规划路径命令 |
+
+### 注意事项
+
+1. **话题重映射**：`laser_to_pointcloud` 订阅 `/uav1/scan_filtered`，但2D Lidar 只发布 `/uav1/scan`
+2. **必须先起飞到 fly_height**：2D Lidar 在地面高度只能扫 z≈0.1m，Global Planner 在 z=1.5m 搜索
+3. **目标点不能在障碍物内**：A* 会报 "goal point is occupied"
+4. **避免 latched 消息**：`rostopic pub --once` 会 latching，导致 goal_cb 反复触发，状态无法从 WAIT_GOAL 切到 PLANNING
+
+---
+
+## 十一、参考信息
 
 - Prometheus 仓库：https://github.com/amov-lab/Prometheus
 - Prometheus_PX4 仓库：https://github.com/amov-lab/Prometheus_PX4
