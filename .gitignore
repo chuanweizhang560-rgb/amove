@@ -1,0 +1,26 @@
+# Build artifacts
+build/
+devel/
+logs/
+
+# PX4 build
+src/Prometheus_PX4/Build/
+src/Prometheus_PX4/build/
+
+# ROS
+*.sage.py
+.catkin_workspace
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# OMC
+.omc/
