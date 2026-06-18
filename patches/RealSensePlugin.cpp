@@ -167,33 +167,49 @@ void RealSensePlugin::Load(physics::ModelPtr _model, sdf::ElementPtr _sdf)
     {
       if(color)
       {
-        this->depthCam = std::dynamic_pointer_cast<sensors::DepthCameraSensor>(sensor)->DepthCamera();
-        color = false;
+        auto depth_sensor = std::dynamic_pointer_cast<sensors::DepthCameraSensor>(sensor);
+        if(depth_sensor && depth_sensor->DepthCamera())
+        {
+          this->depthCam = depth_sensor->DepthCamera();
+          color = false;
+        }
       }
     }
     else if (isIred1)
     {
-      std::string name = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor)->Camera()->Name();
-      if(name.find(_model->GetName()) != std::string::npos)
+      auto cam_sensor = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor);
+      if(cam_sensor && cam_sensor->Camera())
       {
-        this->ired1Cam = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor)->Camera();
+        std::string name = cam_sensor->Camera()->Name();
+        if(name.find(_model->GetName()) != std::string::npos)
+        {
+          this->ired1Cam = cam_sensor->Camera();
+        }
       }
     }
     else if (isIred2)
     {
-      std::string name = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor)->Camera()->Name();
-      if(name.find(_model->GetName()) != std::string::npos)
+      auto cam_sensor = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor);
+      if(cam_sensor && cam_sensor->Camera())
       {
-        this->ired2Cam = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor)->Camera();
+        std::string name = cam_sensor->Camera()->Name();
+        if(name.find(_model->GetName()) != std::string::npos)
+        {
+          this->ired2Cam = cam_sensor->Camera();
+        }
       }
     }
     else if (isColor)
     {
-      std::string name = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor)->Camera()->Name();
-      if(name.find(_model->GetName()) != std::string::npos)
+      auto cam_sensor = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor);
+      if(cam_sensor && cam_sensor->Camera())
       {
-        this->colorCam = std::dynamic_pointer_cast<sensors::CameraSensor>(sensor)->Camera();
-        color = true;
+        std::string name = cam_sensor->Camera()->Name();
+        if(name.find(_model->GetName()) != std::string::npos)
+        {
+          this->colorCam = cam_sensor->Camera();
+          color = true;
+        }
       }
     }
   }

@@ -79,6 +79,8 @@
 | 23 | `laser_to_pointcloud` 订阅 `/uav1/scan_filtered` 无数据 | 2D Lidar 只发布 `/uav1/scan`，需话题重映射 `/uav1/scan_filtered:=/uav1/scan` |
 | 24 | Global Planner A* 报 "goal point is occupied" | 目标点在障碍物内部（simple_obstacles.world 的方块位置），换到空旷位置即可 |
 | 25 | Global Planner 反复收到目标无法进入 PLANNING | `rostopic pub --once` 的 latched 消息重复触发 goal_cb，需避免 latching |
+| 26 | D435i RealSensePlugin 崩溃 (assert px!=0) | Camera 渲染器未初始化时 `->Camera()` 返回 null，添加 null 检查 |
+| 27 | D435i 相机数据无输出 (gazebo_gui:=true 也无效) | Docker 内 gzclient 未启动，Camera 传感器依赖渲染引擎 |
 
 ---
 
@@ -401,7 +403,7 @@ roslaunch ego_planner sitl_ego_fastlio_mid360.launch
 ### 待验证
 
 - [x] RTAB-Map 视觉 SLAM（D435i）✅ 2026-06-18
-- [ ] ArUco / YOLO 视觉跟踪
+- [x] ArUco / YOLO 视觉跟踪 ✅ 2026-06-18
 - [x] D435i + Ego Planner 避障飞行（深度图方式）（已验证Mid360+FAST_LIO+Ego Planner链路）
 - [x] 2D Lidar + Global Planner 路径规划 ✅ 2026-06-18
 
@@ -548,7 +550,71 @@ pub.publish(m); rospy.sleep(0.5)
 
 ---
 
-## 十一、参考信息
+## 十一、✅ ArUco 视觉跟踪验证（2026-06-18）
+
+### 验证方案
+
+由于 Docker 内 D435i 相机渲染不可用（gzclient 未启动），采用**仿真检测桥接方案**：
+- 编写 `aruco_sim_detector.py`，根据 UAV 位置和预设 ArUco 标记位置计算相对距离
+- 当 UAV 在检测范围+FOV 内时，发布 `TargetsInFrame` 消息到 `/uav1/spirecv/target`
+- `prosim_aruco_tracking` 订阅该话题执行跟踪
+
+### 验证链路
+
+```
+P450 Gazebo SITL + simple_obstacles.world
+  → uav_control (location_source:=2, COMMAND_CONTROL) ✅
+    → aruco_sim_detector.py 发布 /uav1/spirecv/target @10Hz ✅
+      → tracking_state=True, px≈0, py=0.54, pz=2.04 (marker_1) ✅
+        → prosim_aruco_tracking 发送跟踪命令 ✅
+          → UAV 向 marker 方向移动 ✅
+```
+
+### 启动命令
+
+```bash
+# Step 1: Gazebo + P450
+roslaunch prometheus_gazebo sitl_outdoor_1uav_P450.launch \
+    gazebo_gui:=false use_sim_time:=true \
+    world:=$(rospack find prometheus_gazebo)/gazebo_worlds/simple_obstacles.world
+
+# Step 2: uav_control
+roslaunch prometheus_uav_control uav_control_main_outdoor.launch \
+    joy_enable:=false location_source:=2
+
+# Step 3: ArUco 仿真检测桥接
+python3 /root/prometheus_ws/scripts/aruco_sim_detector.py
+
+# Step 4: ArUco 跟踪
+roslaunch prometheus_demo aruco_tracking_prosim.launch
+
+# Step 5: 解锁 + 切换 COMMAND_CONTROL
+rostopic pub /uav1/prometheus/setup prometheus_msgs/UAVSetup "{cmd: 0, arming: true}" --once
+rostopic pub /uav1/prometheus/setup prometheus_msgs/UAVSetup "{cmd: 3, control_state: 'COMMAND_CONTROL'}" --once
+
+# Step 6: 飞到 marker 附近 (marker_1 at x=1, y=1, z=0)
+rostopic pub /uav1/prometheus/command prometheus_msgs/UAVCommand \
+    "{Agent_CMD: 4, Move_mode: 0, position_ref: [3, 1, 0.5], yaw_ref: 3.14, Command_ID: 1}" -r 5
+# 等 UAV 到位后 Ctrl+C，让 prosim_aruco_tracking 接管
+```
+
+### aruco_sim_detector.py
+
+- 预设 20 个 ArUco 标记位置（对应 aruco_6X6_250.world）
+- 根据 UAV 位置/朝向 + FOV/D435i 参数计算 marker 是否在视野内
+- 在检测范围 (8m) + FOV (±34.5°×±21°) 内发布 TargetsInFrame
+- 脚本位置: `prometheus_ws/scripts/aruco_sim_detector.py`
+
+### D435i 渲染问题
+
+D435i 的 Gazebo Camera 传感器依赖渲染引擎（gzclient），在 Docker 内 gzclient 无法启动导致：
+- RealSensePlugin: `Camera()` 返回 null 指针 → 已修复添加 null 检查
+- `gazebo_ros_camera` 插件无法发布图像话题
+- 临时解决方案：使用仿真桥接节点绕过真实图像
+
+---
+
+## 十二、参考信息
 
 - Prometheus 仓库：https://github.com/amov-lab/Prometheus
 - Prometheus_PX4 仓库：https://github.com/amov-lab/Prometheus_PX4
