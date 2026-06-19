@@ -82,6 +82,10 @@
 | 26 | D435i RealSensePlugin 崩溃 (assert px!=0) | Camera 渲染器未初始化时 `->Camera()` 返回 null，添加 null 检查 |
 | 27 | D435i 相机数据无输出 (gazebo_gui:=true 也无效) | Docker 内 gzclient 未启动，Camera 传感器依赖渲染引擎 |
 | 28 | 多机仿真 4x P450 需要不同端口 | sitl_px4_outdoor.launch 自动分配 TCP 4560-4563 和 MAVROS namespace |
+| 29 | RealSensePlugin Load 时 Camera 未就绪直接 return | 改为 OnUpdate 中延迟重试，Camera 渲染就绪后自动初始化 |
+| 30 | Launch 文件 gazebo_gui 硬编码为 true | 新增 `<arg name="gazebo_gui" default="true"/>` 参数，6个 launch 文件已修改 |
+| 31 | aruco_sim_detector 垂直 FOV 太小（42°） | 放宽到 87°，支持地面 marker 检测 |
+| 32 | docker exec 中 source setup.bash 不生效 | 新增 scripts/env_setup.sh 硬编码所有路径 |
 
 ---
 
@@ -655,7 +659,101 @@ done
 
 ---
 
-## 十三、参考信息
+## 十三、全功能仿真验证总结（2026-06-19，单容器验证）
+
+### 验证环境
+- 容器：`prometheus_sim`（`prometheus:noetic-px4-v3`）
+- 同一容器逐项验证，每项之间 `docker restart` 清理进程
+
+### 验证结果总览
+
+| # | 功能 | 结果 | 关键指标 |
+|---|------|------|----------|
+| 1 | P450 基础飞行 | ✅ PASS | connected=True, takeoff z=1.31m |
+| 2 | D435i 深度相机 | ✅ PASS | depth @31Hz, color @30Hz（需 gazebo_gui:=true + 等5min） |
+| 3 | 2D Lidar | ✅ PASS | /uav1/scan @10Hz |
+| 4 | FAST_LIO + P600_mid360 + Octomap | ✅ PASS | /livox/lidar @10Hz, mid360_world_point @10Hz, octomap_full @10Hz |
+| 5 | Ego Planner | ✅ PASS | occupancy_inflate @9Hz |
+| 6 | RTAB-Map | ✅ PASS | mapData @1Hz（需 D435i 图像，gazebo_gui:=true + 等5min） |
+| 7 | 2D Lidar + Global Planner | ✅ PASS | global_pcl @5Hz, UAV 追踪目标 (-6,4,1.5) |
+| 8 | ArUco 视觉跟踪 | ✅ PASS | tracking_state=True, tracked_id=1, pz=1.97m |
+| 9 | 多机 Gazebo 仿真 (4x P450) | ✅ PASS | 4x MAVROS connected, 4x uav_control connected |
+
+### 本轮修复
+
+| 修复 | 说明 |
+|------|------|
+| RealSensePlugin 延迟重试 | Camera 渲染器未就绪时不再直接 return，改为 OnUpdate 中每帧重试，直到所有 Camera 就绪后自动初始化 |
+| Launch 文件 gazebo_gui 参数化 | 6 个 launch 文件从硬编码 `gui:=true` 改为 `<arg name="gazebo_gui" default="true"/>` 可配置 |
+| aruco_sim_detector FOV 放宽 | 垂直 FOV 从 42° 放宽到 87°，支持地面 marker 检测 |
+| 容器环境脚本 | 新增 `scripts/env_setup.sh` 硬编码所有路径，解决 docker exec source 不生效问题 |
+| Livox CSV 回退路径 | 容器重启后需重建 `/home/amov/.../mid360.csv` |
+
+### 注意事项
+
+1. **D435i/RTAB-Map 需 gazebo_gui:=true**：Camera 传感器依赖 Gazebo 渲染引擎
+2. **Gazebo 渲染需等待 5 分钟以上**：gzclient 启动后场景渲染需要较长时间
+3. **2D Lidar + Global Planner**：`laser_to_pointcloud` 需话题重映射 `/uav1/scan_filtered:=/uav1/scan`
+4. **容器重启后**：需重建 Livox CSV 回退路径 `/home/amov/prometheus_px4/Tools/sitl_gazebo/models/MID360/scan_mode/mid360.csv`
+
+---
+
+## 十四、控制链路架构分析
+
+### 完整控制链路
+
+```
+用户/上层应用
+    ↓ UAVCommand.msg (Agent_CMD + Move_mode + position_ref/velocity_ref/acc_ref/yaw_ref)
+uav_controller (Prometheus 中间层)
+    ↓ 根据 pos_controller 选择:
+    │
+    ├─ PX4_ORIGIN (默认): 直接发 PositionTarget/AttitudeTarget 到 MAVROS
+    │   ├─ XYZ_POS (0)        → send_pos_setpoint()      → 位置+yaw
+    │   ├─ XY_VEL_Z_POS (1)   → send_vel_xy_pos_z()     → XY速度+Z位置
+    │   ├─ XYZ_VEL (2)        → send_vel_setpoint()      → 三轴速度+yaw
+    │   ├─ XYZ_POS_BODY (3)   → 机体系位置→惯性系转换→send_pos_setpoint()
+    │   ├─ XYZ_VEL_BODY (4)   → 机体系速度→惯性系转换→send_vel_setpoint()
+    │   ├─ XY_VEL_Z_POS_BODY(5)→ 机体系→惯性系→send_vel_xy_pos_z()
+    │   ├─ TRAJECTORY (6)     → send_pos_vel_xyz()       → 位置+速度+yaw
+    │   ├─ XYZ_ATT (7)        → send_attitude_setpoint() → 姿态四元数+油门
+    │   └─ LAT_LON_ALT (8)    → send_global_setpoint()   → 经纬度+yaw
+    │
+    ├─ PID: 位置误差→PID→期望力F_des→期望姿态+油门→send_attitude_setpoint()
+    ├─ UDE: 位置误差→UDE控制器→期望姿态+油门→send_attitude_setpoint()
+    └─ NE:  位置误差→NE控制器→期望姿态+油门→send_attitude_setpoint()
+    ↓
+MAVROS (mavlink协议) → PX4 固件 (位置→速度→姿态→电机混合器→PWM) → 电机
+```
+
+### 4种位置控制器
+
+| 控制器 | 参数值 | 成熟度 | 输出到PX4 | 已验证 |
+|--------|--------|--------|-----------|--------|
+| PX4_ORIGIN | 0 | ⭐⭐⭐⭐⭐ 工业级 | PositionTarget (位置/速度) | ✅ |
+| PID | 1 | ⭐⭐⭐ 学术验证 | AttitudeTarget (姿态+油门) | 未单独验证 |
+| UDE | 2 | ⭐⭐ 实验性 | AttitudeTarget (姿态+油门) | 未单独验证 |
+| NE | 3 | ⭐⭐ 实验性 | AttitudeTarget (姿态+油门) | 未单独验证 |
+
+切换方式: `uav_control_outdoor.yaml` 中 `pos_controller` 参数
+
+### 上层模块使用的控制模式
+
+| 模块 | Move_mode | 控制层级 |
+|------|-----------|----------|
+| Ego Planner | TRAJECTORY (6) | 位置+速度+加速度，最精细 |
+| Global Planner | XYZ_POS (0) | 只给目标位置，PX4自己规划 |
+| Local Planner | XY_VEL_Z_POS (1) | XY速度+Z高度，避障用 |
+| ArUco 跟踪 | XYZ_VEL_BODY (4) | 机体系速度，跟踪目标 |
+
+### 关键区别
+
+- **PX4_ORIGIN**: Prometheus 只管"去哪"，PX4 管"怎么去" — 安全、成熟、已验证
+- **PID/UDE/NE**: Prometheus 自己算"怎么去"，直接发姿态+油门 — 更灵活但需要调参，绕过PX4位置/速度控制器
+
+---
+
+## 十五、参考信息
 
 - Prometheus 仓库：https://github.com/amov-lab/Prometheus
 - Prometheus_PX4 仓库：https://github.com/amov-lab/Prometheus_PX4

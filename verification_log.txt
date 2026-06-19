@@ -1,0 +1,69 @@
+[2026-06-19] Prometheus 全功能仿真验证 - 单容器逐项 (完整记录)
+
+=== 验证1: P450 基础飞行 - PASS ===
+  spawn: OK, PX4 SITL连接TCP 4560, MAVROS HEARTBEAT connected
+  uav_control: connected=True, odom_valid=True
+  起飞到 z=1.31m, 降落正常
+
+=== 验证2: D435i 深度相机 - PASS ===
+  话题注册: OK (color/depth/infra/points 均存在)
+  数据输出: depth @31Hz, color @30Hz
+  需 gazebo_gui:=true + 等待5min渲染
+  RealSensePlugin延迟重试修复生效
+
+=== 验证3: 2D Lidar - PASS ===
+  /uav1/scan @10Hz, LaserScan 数据正常
+
+=== 验证4: FAST_LIO + P600_mid360 + Octomap - PASS ===
+  /livox/lidar @10Hz
+  /uav1/mid360_world_point @10Hz
+  /uav1/mid360_lidar_point @10Hz
+  /uav1/octomap_full @10Hz
+  备注: 需要先创建 Livox CSV 回退路径 /home/amov/...
+
+=== 验证5: Ego Planner 避障规划 - PASS ===
+  ego_planner_node 运行正常
+  /uav1_ego_planner_node/grid_map/occupancy_inflate @9Hz
+
+=== 验证6: RTAB-Map 视觉 SLAM - PASS ===
+  D435i depth @31Hz, color @30Hz
+  RTAB-Map mapData @1Hz
+  需 D435i 图像 + TF 变换(2个static_transform_publisher)
+
+=== 验证7: 2D Lidar + Global Planner - PASS ===
+  /uav1/scan @10Hz
+  /uav1/octomap_full @10Hz
+  Global Planner: global_pcl @5Hz, inflate_pcl @5Hz
+  UAV起飞到1.5m, 目标(-6,4,1.5)路径追踪正常
+  备注: laser_to_pointcloud需话题重映射 /uav1/scan_filtered:=/uav1/scan
+
+=== 验证8: ArUco 视觉跟踪 - PASS ===
+  aruco_sim_detector -> /uav1/spirecv/target @10Hz
+  tracking_state=True, tracked_id=1, pz=1.97m
+  prosim_aruco_tracking 运行正常
+  修复: FOV_v 从42度放宽到87度以支持地面marker检测
+
+=== 验证9: 多机 Gazebo 仿真 (4x P450) - PASS ===
+  4x MAVROS: 全部connected
+  4x uav_control: 全部connected=True
+
+=== 控制链路分析 ===
+4种位置控制器均存在且编译通过:
+  PX4_ORIGIN (0): 工业级, 发PositionTarget到PX4, PX4内部全闭环 - 默认且已验证
+  PID (1): 学术级, 位置误差→PID→姿态+油门→AttitudeTarget - 未单独验证
+  UDE (2): 实验性, 不确定度估计控制器 - 未单独验证
+  NE (3): 实验性, 非线性增强控制器 - 未单独验证
+
+上层模块控制模式:
+  Ego Planner → TRAJECTORY (位置+速度+加速度, 最精细)
+  Global Planner → XYZ_POS (只给目标位置)
+  ArUco 跟踪 → XY_VEL_Z_POS (XY速度+Z高度)
+
+切换方式: uav_control_outdoor.yaml 的 pos_controller 参数
+
+=== 本轮修复 ===
+1. RealSensePlugin延迟重试: Camera渲染未就绪时OnUpdate中重试, 不再直接return
+2. Launch文件gazebo_gui参数化: 6个launch文件从硬编码改为可配置arg
+3. aruco_sim_detector FOV放宽: 垂直FOV 42°→87°
+4. 容器环境脚本: scripts/env_setup.sh 硬编码路径
+5. Livox CSV回退路径: 容器重启后需重建

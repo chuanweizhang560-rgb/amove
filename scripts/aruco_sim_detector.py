@@ -28,7 +28,7 @@ class ArucoSimDetector:
         self.detect_range = rospy.get_param('~detect_range', 8.0)  # 最大检测距离
         self.marker_size = rospy.get_param('~marker_size', 0.5)    # 标记尺寸(m)
         self.fov_h = rospy.get_param('~fov_h', 69.0)               # D435i 水平FOV(度)
-        self.fov_v = rospy.get_param('~fov_v', 42.0)               # D435i 垂直FOV(度)
+        self.fov_v = rospy.get_param('~fov_v', 87.0)               # 垂直FOV(度), 验证用放宽
         self.img_w = rospy.get_param('~img_w', 640)                 # 图像宽度
         self.img_h = rospy.get_param('~img_h', 480)                 # 图像高度
 
